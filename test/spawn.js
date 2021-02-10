@@ -8,9 +8,12 @@ const file = __filename
 process.env.TAP_BAIL = ''
 process.env.TAP_BUFFER = ''
 
-const clean = require('./clean-stacks.js')
+t.cleanSnapshot = require('./clean-stacks.js')
 
 const main = () => {
+  // this test can be slow, especially on CI
+  t.setTimeout(120000)
+
   t.test('basic child process', t =>
     t.spawn(node, [ file, 'ok' ]))
 
@@ -31,16 +34,29 @@ const main = () => {
       timeout: 1
     }))
 
+  t.test('timeout update', t => {
+    const s = new Spawn({
+      command: node,
+      args: [file, 'timeout-update'],
+      buffered: true,
+    })
+    t.plan(2)
+    s.main(() => {
+      t.equal(s.timer.duration, 42069, 'timer updated')
+      t.matchSnapshot(s.output)
+    })
+  })
+
   t.test('timeout KILL', t => {
     const s = new Spawn({
       command: node,
       args: [ file, 'catch-term' ],
-      timeout: process.env.CI ? 2000 : 500,
+      timeout: process.env.CI ? 20000 : 2000,
       buffered: true,
       name: 'killa'
     })
     s.main(() => {
-      t.matchSnapshot(clean(s.output))
+      t.matchSnapshot(s.output)
       t.end()
     })
   })
@@ -53,7 +69,7 @@ const main = () => {
     }, 'skipper')
     tt.spawn(node, [ file, 'skip-reason' ])
     tt.test('check it', ttt => {
-      t.matchSnapshot(clean(tt.output))
+      t.matchSnapshot(tt.output)
       t.end()
       tt.end()
       ttt.end()
@@ -88,7 +104,7 @@ const main = () => {
       p.stdin.end('TAP version 13\nok\n1..1\n'))
 
     t.plan(1)
-    s.main(() => t.matchSnapshot(clean(s.output)))
+    s.main(() => t.matchSnapshot(s.output))
   })
 
   t.test('failure to spawn', t => {
@@ -100,7 +116,8 @@ const main = () => {
       stdio: [0, 1, 2]
     })
     t.plan(1)
-    s.main(() => t.matchSnapshot(clean(s.output)))
+    // Fixup for errno property change in 13.x
+    s.main(() => t.matchSnapshot(s.output.replace(/errno: -2/, 'errno: ENOENT')))
   })
 
   t.test('failure to spawn even harder', t => {
@@ -117,6 +134,7 @@ const main = () => {
       stdio: 'inherit'
     })
     s.main(_ => {
+      t.match(s.output, 'tapCaught: spawn\n')
       t.match(s.output, 'not ok 1 - poop error\n')
       t.match(s.output, 'command: poop\n')
       t.end()
@@ -154,6 +172,34 @@ const main = () => {
     })
     t.end()
   })
+
+  t.test('childId', t => {
+    t.test('via childId option', t => {
+      const s = new Spawn({
+        command: node,
+        buffered: true,
+        args: [ file, 'childId' ],
+        childId: 69420,
+      })
+      s.main(() => {
+        t.matchSnapshot(s.output)
+        t.end()
+      })
+    })
+    t.test('via TAP_CHILD_ID env', t => {
+      const s = new Spawn({
+        command: node,
+        buffered: true,
+        args: [ file, 'childId' ],
+        env: { ...(process.env), TAP_CHILD_ID: '69420' },
+      })
+      s.main(() => {
+        t.matchSnapshot(s.output)
+        t.end()
+      })
+    })
+    t.end()
+  })
 }
 
 // Ignore this because a lot of these cases involve
@@ -172,7 +218,7 @@ switch (process.argv[2]) {
 
   case 'sigself':
     setTimeout(_ =>
-      process.kill(process.pid, 'SIGQUIT'), 300)
+      process.kill(process.pid, process.platform === 'win32' ? 'SIGTERM' : 'SIGQUIT'), 300)
     break
 
   case 'not-ok':
@@ -190,7 +236,16 @@ switch (process.argv[2]) {
   case 'catch-term':
     process.on('SIGTERM', _ => console.log('SIGTERM'))
   case 'timeout':
-    setTimeout(_ => _, process.env.CI ? 50000 : 5000)
+    setTimeout(_ => _, process.env.CI ? 50000 : 10000)
+    break
+
+  case 'timeout-update':
+    t.setTimeout(42069)
+    t.pass('this is fine')
+    break
+
+  case 'childId':
+    console.log(`childId=${process.env.TAP_CHILD_ID}`)
     break
 
   default:
